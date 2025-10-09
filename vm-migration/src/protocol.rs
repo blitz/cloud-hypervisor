@@ -88,8 +88,8 @@ impl Request {
         }
     }
 
-    pub fn start() -> Self {
-        Self::new(Command::Start, 0)
+    pub fn start(length: u64) -> Self {
+        Self::new(Command::Start, length)
     }
 
     pub fn state(length: u64) -> Self {

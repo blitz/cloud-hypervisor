@@ -1345,7 +1345,7 @@ impl Vmm {
         let mut socket = Self::send_migration_socket(&send_data_migration.destination_url)?;
 
         // Start the migration
-        Request::start().write_to(&mut socket)?;
+        Request::start(0).write_to(&mut socket)?;
         Response::read_from(&mut socket)?.ok_or_abandon(
             &mut socket,
             MigratableError::MigrateSend(anyhow!("Error starting migration")),
