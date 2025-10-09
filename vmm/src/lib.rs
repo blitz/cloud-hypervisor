@@ -2391,8 +2391,8 @@ impl RequestHandler for Vmm {
                     memory_manager = Some(memory_manager_config);
 
                     if let Some(ref restored_net_configs) = receive_data_migration.net_fds {
-                        // TODO do some validaiton
-                        //restored_net_config.validate();
+                        // TODO do some validation
+                        // restored_net_config.validate();
                         // Update VM's net configurations with new fds received for restore operation
 
                         let mut vm_config = self.vm_config.as_mut().unwrap().lock().unwrap();
