@@ -2374,23 +2374,18 @@ impl RequestHandler for Vmm {
         let mut existing_memory_files = None;
         loop {
             let req = Request::read_from(&mut socket)?;
+            info!("Command {:?} received", req.command());
+
             match req.command() {
-                Command::Invalid => info!("Invalid Command Received"),
-                Command::Start => {
-                    info!("Start Command Received");
+                Command::Invalid => {
+                    Response::error().write_to(&mut socket)?;
+                }
+                Command::Start if !started => {
                     started = true;
 
                     Response::ok().write_to(&mut socket)?;
                 }
-                Command::Config => {
-                    info!("Config Command Received");
-
-                    if !started {
-                        warn!("Migration not started yet");
-                        Response::error().write_to(&mut socket)?;
-                        continue;
-                    }
-
+                Command::Config if started => {
                     let memory_manager_config =
                         self.vm_receive_config(&req, &mut socket, existing_memory_files.take())?;
                     memory_manager = Some(memory_manager_config);
@@ -2421,14 +2416,7 @@ impl RequestHandler for Vmm {
                         }
                     };
                 }
-                Command::State => {
-                    info!("State Command Received");
-
-                    if !started {
-                        warn!("Migration not started yet");
-                        Response::error().write_to(&mut socket)?;
-                        continue;
-                    }
+                Command::State if started => {
                     if let Some(mm) = memory_manager.take() {
                         self.vm_receive_state(&req, &mut socket, mm)?;
                     } else {
@@ -2436,14 +2424,7 @@ impl RequestHandler for Vmm {
                         Response::error().write_to(&mut socket)?;
                     }
                 }
-                Command::Memory => {
-                    info!("Memory Command Received");
-
-                    if !started {
-                        warn!("Migration not started yet");
-                        Response::error().write_to(&mut socket)?;
-                        continue;
-                    }
+                Command::Memory if started => {
                     if let Some(mm) = memory_manager.as_ref() {
                         self.vm_receive_memory(&req, &mut socket, &mut mm.lock().unwrap())?;
                     } else {
@@ -2451,15 +2432,7 @@ impl RequestHandler for Vmm {
                         Response::error().write_to(&mut socket)?;
                     }
                 }
-                Command::MemoryFd => {
-                    info!("MemoryFd Command Received");
-
-                    if !started {
-                        warn!("Migration not started yet");
-                        Response::error().write_to(&mut socket)?;
-                        continue;
-                    }
-
+                Command::MemoryFd if started => {
                     match &mut socket {
                         SocketStream::Unix(unix_socket) => {
                             let mut buf = [0u8; 4];
@@ -2491,7 +2464,6 @@ impl RequestHandler for Vmm {
                     }
                 }
                 Command::Complete => {
-                    info!("Complete Command Received");
                     if let Some(ref mut vm) = self.vm.as_mut() {
                         vm.resume()?;
                         Response::ok().write_to(&mut socket)?;
@@ -2502,11 +2474,17 @@ impl RequestHandler for Vmm {
                     break;
                 }
                 Command::Abandon => {
-                    info!("Abandon Command Received");
                     self.vm = None;
                     self.vm_config = None;
                     Response::ok().write_to(&mut socket).ok();
                     break;
+                }
+                cmd => {
+                    warn!(
+                        "Protocol violation for {cmd:?} (started={started}), returning error and continuing"
+                    );
+                    Response::error().write_to(&mut socket)?;
+                    continue;
                 }
             }
         }

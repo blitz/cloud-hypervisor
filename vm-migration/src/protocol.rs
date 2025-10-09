@@ -50,7 +50,7 @@ use crate::MigratableError;
 // The source can at any time send an "abandon request" to cancel
 
 #[repr(u16)]
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub enum Command {
     Invalid,
     Start,
