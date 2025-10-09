@@ -30,7 +30,7 @@ use std::sync::mpsc::{Receiver, RecvError, SendError, Sender};
 use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "riscv64"))]
 use std::time::{Duration, Instant};
-use std::{io, result, thread};
+use std::{io, iter, result, thread};
 
 use anyhow::anyhow;
 #[cfg(feature = "dbus_api")]
@@ -727,6 +727,27 @@ pub struct Vmm {
     console_info: Option<ConsoleInfo>,
 }
 
+fn vm_receive_memory<T>(
+    req: &Request,
+    socket: &mut T,
+    memory_manager: &mut MemoryManager,
+) -> std::result::Result<(), MigratableError>
+where
+    T: Read + ReadVolatile + Write,
+{
+    // Read table
+    let table = MemoryRangeTable::read_from(socket, req.length())?;
+
+    // And then read the memory itself
+    memory_manager
+        .receive_memory_regions(&table, socket)
+        .inspect_err(|_| {
+            Response::error().write_to(socket).ok();
+        })?;
+    Response::ok().write_to(socket)?;
+    Ok(())
+}
+
 impl Vmm {
     pub const HANDLED_SIGNALS: [i32; 2] = [SIGTERM, SIGINT];
 
@@ -1050,17 +1071,7 @@ impl Vmm {
     where
         T: Read + ReadVolatile + Write,
     {
-        // Read table
-        let table = MemoryRangeTable::read_from(socket, req.length())?;
-
-        // And then read the memory itself
-        memory_manager
-            .receive_memory_regions(&table, socket)
-            .inspect_err(|_| {
-                Response::error().write_to(socket).ok();
-            })?;
-        Response::ok().write_to(socket)?;
-        Ok(())
+        vm_receive_memory(req, socket, memory_manager)
     }
 
     fn socket_url_to_path(url: &str) -> result::Result<PathBuf, MigratableError> {
@@ -1096,8 +1107,13 @@ impl Vmm {
 
     fn receive_migration_socket(
         receiver_url: &str,
-    ) -> std::result::Result<SocketStream, MigratableError> {
+    ) -> std::result::Result<(TcpListener, SocketStream), MigratableError> {
         if let Some(address) = receiver_url.strip_prefix("tcp:") {
+            // TODO: The listener has a platform defined backlog. We
+            // need to handle ECONNREFUSED on the sender side when
+            // establishing additional connections if we run into the
+            // backlog limit. Seems to be 4096 in newer kernels
+            // (>=5.4). See /proc/sys/net/core/somaxconn
             let listener = TcpListener::bind(address).map_err(|e| {
                 MigratableError::MigrateReceive(anyhow!("Error binding to TCP socket: {}", e))
             })?;
@@ -1109,14 +1125,14 @@ impl Vmm {
                 ))
             })?;
 
-            Ok(SocketStream::Tcp(socket))
+            Ok((listener, SocketStream::Tcp(socket)))
         } else {
             let path = Vmm::socket_url_to_path(receiver_url)?;
             let listener = UnixListener::bind(&path).map_err(|e| {
                 MigratableError::MigrateReceive(anyhow!("Error binding to UNIX socket: {}", e))
             })?;
 
-            let (socket, _addr) = listener.accept().map_err(|e| {
+            let (_socket, _addr) = listener.accept().map_err(|e| {
                 MigratableError::MigrateReceive(anyhow!(
                     "Error accepting connection on UNIX socket: {}",
                     e
@@ -1128,7 +1144,8 @@ impl Vmm {
                 MigratableError::MigrateReceive(anyhow!("Error removing UNIX socket file: {}", e))
             })?;
 
-            Ok(SocketStream::Unix(socket))
+            todo!("Can't handle this right now.")
+            // Ok(SocketStream::Unix(socket))
         }
     }
 
@@ -1136,6 +1153,7 @@ impl Vmm {
     fn vm_maybe_send_dirty_pages(
         vm: &mut Vm,
         socket: &mut SocketStream,
+        mem_sockets: &mut [SocketStream],
         table: MemoryRangeTable,
     ) -> result::Result<bool, MigratableError> {
         // But if there are no regions go straight to pause
@@ -1143,6 +1161,7 @@ impl Vmm {
             return Ok(false);
         }
 
+        error!("XXXXX Need to split requests among all sockets");
         Request::memory(table.length()).write_to(socket).unwrap();
         table.write_to(socket)?;
         // And then the memory itself
@@ -1167,6 +1186,7 @@ impl Vmm {
     fn memory_copy_iterations(
         vm: &mut Vm,
         socket: &mut SocketStream,
+        mem_sockets: &mut [SocketStream],
         s: &mut MigrationState,
         migration_timeout: Duration,
         migrate_downtime_limit: Duration,
@@ -1231,7 +1251,7 @@ impl Vmm {
 
             // Send the current dirty pages
             let transfer_start = Instant::now();
-            Self::vm_maybe_send_dirty_pages(vm, socket, iteration_table.clone())?;
+            Self::vm_maybe_send_dirty_pages(vm, socket, mem_sockets, iteration_table.clone())?;
             let transfer_time = transfer_start.elapsed().as_millis() as f64;
 
             // Update bandwidth
@@ -1261,12 +1281,13 @@ impl Vmm {
     fn do_memory_migration(
         vm: &mut Vm,
         socket: &mut SocketStream,
+        mem_sockets: &mut [SocketStream],
         s: &mut MigrationState,
         send_data_migration: &VmSendMigrationData,
     ) -> result::Result<(), MigratableError> {
         // Start logging dirty pages
         vm.start_dirty_log()?;
-
+        error!("XXXXX Need to split requests among all sockets");
         // Send memory table
         let table = vm.memory_range_table()?;
         Request::memory(table.length()).write_to(socket).unwrap();
@@ -1302,8 +1323,14 @@ impl Vmm {
             )));
         }
 
-        let iteration_table =
-            Self::memory_copy_iterations(vm, socket, s, migration_timeout, migrate_downtime_limit)?;
+        let iteration_table = Self::memory_copy_iterations(
+            vm,
+            socket,
+            mem_sockets,
+            s,
+            migration_timeout,
+            migrate_downtime_limit,
+        )?;
 
         info!("Entering downtime phase");
         s.downtime_start = Instant::now();
@@ -1318,7 +1345,7 @@ impl Vmm {
         // Send last batch of dirty pages
         let mut final_table = vm.dirty_log()?;
         final_table.extend(iteration_table.clone());
-        Self::vm_maybe_send_dirty_pages(vm, socket, final_table.clone())?;
+        Self::vm_maybe_send_dirty_pages(vm, socket, mem_sockets, final_table.clone())?;
 
         // Update statistics
         s.pending_size = final_table.regions().iter().map(|range| range.length).sum();
@@ -1417,7 +1444,19 @@ impl Vmm {
             // Now pause VM
             vm.pause()?;
         } else {
-            Self::do_memory_migration(vm, &mut socket, &mut s, &send_data_migration)?;
+            let mut mem_sockets = iter::repeat_with(|| {
+                Self::send_migration_socket(&send_data_migration.destination_url).unwrap()
+            })
+            .take(4)
+            .collect::<Vec<_>>();
+
+            Self::do_memory_migration(
+                vm,
+                &mut socket,
+                &mut mem_sockets,
+                &mut s,
+                &send_data_migration,
+            )?;
         }
 
         // We release the locks early to enable locking them on the destination host.
@@ -2367,7 +2406,8 @@ impl RequestHandler for Vmm {
         );
 
         // Accept the connection and get the socket
-        let mut socket = Vmm::receive_migration_socket(&receive_data_migration.receiver_url)?;
+        let (listener, mut socket) =
+            Vmm::receive_migration_socket(&receive_data_migration.receiver_url)?;
 
         let mut started = false;
         let mut memory_manager: Option<Arc<Mutex<MemoryManager>>> = None;
@@ -2388,7 +2428,7 @@ impl RequestHandler for Vmm {
                 Command::Config if started => {
                     let memory_manager_config =
                         self.vm_receive_config(&req, &mut socket, existing_memory_files.take())?;
-                    memory_manager = Some(memory_manager_config);
+                    memory_manager = Some(memory_manager_config.clone());
 
                     if let Some(ref restored_net_configs) = receive_data_migration.net_fds {
                         // TODO do some validation
@@ -2415,6 +2455,40 @@ impl RequestHandler for Vmm {
                             }
                         }
                     };
+
+                    let listener = listener.try_clone().unwrap();
+                    let connection_thread = thread::spawn(move || {
+                        for fd in listener.incoming().take(4) {
+                            info!("Accepted connection! {:?}", fd);
+                            let fd = fd.unwrap();
+                            let memory_manager = memory_manager_config.clone();
+
+                            let mem_receiver = thread::spawn(move || {
+                                let mut fd = fd;
+                                loop {
+                                    let req = Request::read_from(&mut fd).unwrap();
+                                    info!("EXTRA THREAD: Command {:?} received", req.command());
+
+                                    match req.command() {
+                                        Command::Memory => {
+                                            vm_receive_memory(
+                                                &req,
+                                                &mut fd,
+                                                // TODO: This lock is killing performance, because both receiving data and writing
+                                                // it to memory is serialized. We can use guest_memory() directly.
+                                                &mut memory_manager.lock().unwrap(),
+                                            )
+                                            .unwrap();
+                                        }
+
+                                        _ => {
+                                            error!("Invalid command {:?}", req.command());
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    });
                 }
                 Command::State if started => {
                     if let Some(mm) = memory_manager.take() {

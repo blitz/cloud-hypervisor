@@ -2601,7 +2601,6 @@ impl Vm {
     {
         let guest_memory = self.memory_manager.lock().as_ref().unwrap().guest_memory();
         let mem = guest_memory.memory();
-
         for range in ranges.regions() {
             let mut offset: u64 = 0;
             // Here we are manually handling the retry in case we can't the
