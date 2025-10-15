@@ -215,18 +215,67 @@ impl Response {
 }
 
 #[repr(C)]
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MemoryRange {
     pub gpa: u64,
     pub length: u64,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MemoryRangeTable {
     data: Vec<MemoryRange>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct MemoryRangeTableIterator {
+    chunk_size: u64,
+    data: Vec<MemoryRange>,
+}
+
+impl MemoryRangeTableIterator {
+    pub fn new(table: &MemoryRangeTable, chunk_size: u64) -> Self {
+        MemoryRangeTableIterator {
+            chunk_size,
+            data: table.data.clone(),
+        }
+    }
+}
+
+impl Iterator for MemoryRangeTableIterator {
+    type Item = MemoryRangeTable;
+
+    /// Return the next memory range in the table, making sure that
+    /// the returned range is not larger than `chunk_size`.
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(range) = self.data.pop() {
+            let next_range: MemoryRange = if range.length > self.chunk_size {
+                self.data.push(MemoryRange {
+                    gpa: range.gpa + self.chunk_size,
+                    length: range.length - self.chunk_size,
+                });
+                MemoryRange {
+                    gpa: range.gpa,
+                    length: self.chunk_size,
+                }
+            } else {
+                range
+            };
+
+            Some(MemoryRangeTable {
+                data: vec![next_range],
+            })
+        } else {
+            None
+        }
+    }
+}
+
 impl MemoryRangeTable {
+    /// Partitions the table into chunks of at most `chunk_size` bytes.
+    pub fn partition(&self, chunk_size: u64) -> impl Iterator<Item = MemoryRangeTable> {
+        MemoryRangeTableIterator::new(self, chunk_size)
+    }
+
     pub fn from_bitmap(bitmap: Vec<u64>, start_addr: u64, page_size: u64) -> Self {
         let mut table = MemoryRangeTable::default();
         let mut entry: Option<MemoryRange> = None;

@@ -737,7 +737,7 @@ where
 {
     // Read table
     let table = MemoryRangeTable::read_from(socket, req.length())?;
-
+    //info!("Received memory table: {:?}", table);
     // And then read the memory itself
     memory_manager
         .receive_memory_regions(&table, socket)
@@ -745,6 +745,31 @@ where
             Response::error().write_to(socket).ok();
         })?;
     Response::ok().write_to(socket)?;
+    Ok(())
+}
+
+fn vm_send_memory<T>(
+    table: &MemoryRangeTable,
+    socket: &mut T,
+    mem_sockets: &mut [T],
+    vm: &mut Vm,
+) -> std::result::Result<(), MigratableError>
+where
+    T: Read + ReadVolatile + Write + WriteVolatile,
+{
+    for (index, table) in table.partition(2 << 20).enumerate() {
+        let socket = &mut mem_sockets[index % mem_sockets.len()];
+
+        Request::memory(table.length()).write_to(socket).unwrap();
+        table.write_to(socket)?;
+        // And then the memory itself
+        vm.send_memory_regions(&table, socket)?;
+        Response::read_from(socket)?.ok_or_abandon(
+            socket,
+            MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
+        )?;
+    }
+
     Ok(())
 }
 
@@ -1161,16 +1186,7 @@ impl Vmm {
             return Ok(false);
         }
 
-        error!("XXXXX Need to split requests among all sockets");
-        Request::memory(table.length()).write_to(socket).unwrap();
-        table.write_to(socket)?;
-        // And then the memory itself
-        vm.send_memory_regions(&table, socket)?;
-        Response::read_from(socket)?.ok_or_abandon(
-            socket,
-            MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
-        )?;
-
+        vm_send_memory(&table, socket, mem_sockets, vm)?;
         Ok(true)
     }
 
@@ -1287,17 +1303,8 @@ impl Vmm {
     ) -> result::Result<(), MigratableError> {
         // Start logging dirty pages
         vm.start_dirty_log()?;
-        error!("XXXXX Need to split requests among all sockets");
-        // Send memory table
-        let table = vm.memory_range_table()?;
-        Request::memory(table.length()).write_to(socket).unwrap();
-        table.write_to(socket)?;
-        // And then the memory itself
-        vm.send_memory_regions(&table, socket)?;
-        Response::read_from(socket)?.ok_or_abandon(
-            socket,
-            MigratableError::MigrateSend(anyhow!("Error during dirty memory migration")),
-        )?;
+
+        vm_send_memory(&vm.memory_range_table()?, socket, mem_sockets, vm)?;
 
         // Define the maximum allowed downtime 2000 seconds(2000000 milliseconds)
         const MAX_MIGRATE_DOWNTIME: u64 = 2000000;
@@ -2467,7 +2474,7 @@ impl RequestHandler for Vmm {
                                 let mut fd = fd;
                                 loop {
                                     let req = Request::read_from(&mut fd).unwrap();
-                                    info!("EXTRA THREAD: Command {:?} received", req.command());
+                                    //info!("EXTRA THREAD: Command {:?} received", req.command());
 
                                     match req.command() {
                                         Command::Memory => {
