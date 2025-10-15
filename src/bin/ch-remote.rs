@@ -489,6 +489,11 @@ fn rest_api_do_command(matches: &ArgMatches, socket: &mut UnixStream) -> ApiResu
                     .unwrap()
                     .get_one::<u64>("migration-timeout-s")
                     .unwrap_or(&3600),
+                *matches
+                    .subcommand_matches("send-migration")
+                    .unwrap()
+                    .get_one::<u32>("connections")
+                    .unwrap_or(&1),
             );
             simple_api_command(socket, "PUT", "send-migration", Some(&send_migration_data))
                 .map_err(Error::HttpApiClient)
@@ -906,12 +911,19 @@ fn receive_migration_data(url: &str) -> String {
     serde_json::to_string(&receive_migration_data).unwrap()
 }
 
-fn send_migration_data(url: &str, local: bool, downtime: u64, migration_timeout: u64) -> String {
+fn send_migration_data(
+    url: &str,
+    local: bool,
+    downtime: u64,
+    migration_timeout: u64,
+    connections: u32,
+) -> String {
     let send_migration_data = vmm::api::VmSendMigrationData {
         destination_url: url.to_owned(),
         local,
         downtime,
         migration_timeout,
+        connections,
     };
 
     serde_json::to_string(&send_migration_data).unwrap()
@@ -1101,6 +1113,14 @@ fn get_cli_commands_sorted() -> Box<[Command]> {
                     .long("local")
                     .num_args(0)
                     .action(ArgAction::SetTrue),
+            )
+            .arg(
+                Arg::new("connections")
+                    .long("connections")
+                    .help("The number of connections to use for the migration")
+                    .num_args(1)
+                    .value_parser(clap::value_parser!(u32))
+                    .default_value("1"),
             ),
         Command::new("shutdown").about("Shutdown the VM"),
         Command::new("shutdown-vmm").about("Shutdown the VMM"),
