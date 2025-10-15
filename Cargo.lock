@@ -2387,6 +2387,7 @@ name = "vm-migration"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "log",
  "serde",
  "serde_json",
  "thiserror 2.0.12",

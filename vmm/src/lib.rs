@@ -2421,7 +2421,7 @@ impl RequestHandler for Vmm {
         let mut existing_memory_files = None;
         loop {
             let req = Request::read_from(&mut socket)?;
-            info!("Command {:?} received", req.command());
+            //info!("Command {:?} received", req.command());
 
             match req.command() {
                 Command::Invalid => {

@@ -3,7 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use std::io::{Read, Write};
+use std::{
+    io::{Read, Write},
+    ops::Range,
+};
+
+use log::info;
 
 use serde::{Deserialize, Serialize};
 use vm_memory::ByteValued;
@@ -247,25 +252,52 @@ impl Iterator for MemoryRangeTableIterator {
     /// Return the next memory range in the table, making sure that
     /// the returned range is not larger than `chunk_size`.
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(range) = self.data.pop() {
-            let next_range: MemoryRange = if range.length > self.chunk_size {
-                self.data.push(MemoryRange {
-                    gpa: range.gpa + self.chunk_size,
-                    length: range.length - self.chunk_size,
-                });
-                MemoryRange {
-                    gpa: range.gpa,
-                    length: self.chunk_size,
-                }
-            } else {
-                range
-            };
+        let mut ranges: Vec<MemoryRange> = vec![];
+        let mut ranges_size: u64 = 0;
 
-            Some(MemoryRangeTable {
-                data: vec![next_range],
-            })
-        } else {
+        loop {
+            if ranges_size >= self.chunk_size || self.data.is_empty() {
+                break;
+            }
+
+            if let Some(range) = self.data.pop() {
+                let next_range: MemoryRange = if ranges_size + range.length > self.chunk_size {
+                    // How many bytes we need to put back into the table.
+                    let leftover_bytes = ranges_size + range.length - self.chunk_size;
+                    assert!(leftover_bytes <= range.length);
+                    let returned_bytes = range.length - leftover_bytes;
+                    assert!(returned_bytes <= range.length);
+                    assert!(leftover_bytes + returned_bytes == range.length);
+
+                    info!(
+                        "Splitting {}M range into {}K",
+                        range.length >> 20,
+                        leftover_bytes >> 10
+                    );
+
+                    self.data.push(MemoryRange {
+                        gpa: range.gpa + returned_bytes,
+                        length: leftover_bytes,
+                    });
+                    MemoryRange {
+                        gpa: range.gpa,
+                        length: returned_bytes,
+                    }
+                } else {
+                    range
+                };
+
+                info!("range {:#}+{:#}", next_range.gpa, next_range.length);
+                ranges_size += next_range.length;
+                ranges.push(next_range);
+            }
+        }
+
+        info!("{} ranges", ranges.len());
+        if ranges.is_empty() {
             None
+        } else {
+            Some(MemoryRangeTable { data: ranges })
         }
     }
 }
